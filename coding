@@ -1,0 +1,148 @@
+#include <iostream>
+#include <cstring>
+#include <cmath>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <chrono>
+
+extern "C" {
+#include <mavlink/standard/mavlink.h>
+#include <mavlink/standard/mavlink_msg_mount_control.h>
+}
+
+#define MAVLINK_UDP_PORT 14550
+#define SYSTEM_ID 1
+#define COMPONENT_ID 1
+#define HEARTBEAT_INTERVAL_MS 1000
+
+// Structure to hold gimbal information
+struct GimbalInfo {
+    float yaw;
+    float pitch;
+    float roll;
+};
+
+// Structure to simulate GPS coordinates
+struct GPSInfo {
+    double latitude;
+    double longitude;
+    double altitude;
+};
+
+// Function to parse MAVLink gimbal command message
+void parseGimbalCommand(const mavlink_mount_control_t &gimbalCommand, const GPSInfo &droneGPS, GimbalInfo &gimbalInfo) {
+    // Assuming map clicks are directly related to gimbal control commands, modify this logic accordingly
+    gimbalInfo.roll = atan2(gimbalCommand.input_a / 100.0, gimbalCommand.input_c / 100.0) * 180 / M_PI;
+    gimbalInfo.pitch = atan2(gimbalCommand.input_b / 100.0, gimbalCommand.input_c / 100.0) * 180 / M_PI;
+    gimbalInfo.yaw = atan2(gimbalCommand.input_a / 100.0, gimbalCommand.input_b / 100.0) * 180 / M_PI;
+
+    // Adjust angles based on drone's current GPS altitude
+    gimbalInfo.pitch += static_cast<float>(droneGPS.altitude);
+
+    // Print received gimbal control values for debugging
+    std::cout << "Received Gimbal Control Message: "
+              << "Input A: " << gimbalCommand.input_a << ", "
+              << "Input B: " << gimbalCommand.input_b << ", "
+              << "Input C: " << gimbalCommand.input_c << std::endl;
+
+    // Display gimbal control commands for debugging
+    std::cout << "Gimbal Control Command: Roll=" << gimbalInfo.roll << " Pitch=" << gimbalInfo.pitch << " Yaw=" << gimbalInfo.yaw << std::endl;
+}
+
+// Function to send MAVLink heartbeat message
+void sendHeartbeat(int udpSocket) {
+    mavlink_message_t msg;
+    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+
+    mavlink_msg_heartbeat_pack(SYSTEM_ID, COMPONENT_ID, &msg, MAV_TYPE_GIMBAL, MAV_AUTOPILOT_GENERIC, MAV_MODE_MANUAL_ARMED, 0, MAV_STATE_ACTIVE);
+
+    uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
+
+    ssize_t sent = sendto(udpSocket, buf, len, 0, nullptr, 0);
+
+    if (sent == -1) {
+        std::cerr << "Error sending heartbeat" << std::endl;
+    }
+}
+
+int main() {
+    int udpSocket = socket(AF_INET, SOCK_DGRAM, 0);
+
+    if (udpSocket < 0) {
+        std::cerr << "Error creating socket" << std::endl;
+        return -1;
+    }
+
+    sockaddr_in localAddress{};
+    localAddress.sin_family = AF_INET;
+    localAddress.sin_port = htons(MAVLINK_UDP_PORT);
+    localAddress.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(udpSocket, reinterpret_cast<sockaddr *>(&localAddress), sizeof(localAddress)) < 0) {
+        std::cerr << "Error binding socket" << std::endl;
+        close(udpSocket);
+        return -1;
+    }
+
+    mavlink_system_t mavlink_system{};
+    mavlink_system.sysid = SYSTEM_ID;
+    mavlink_system.compid = COMPONENT_ID;
+
+    GimbalInfo gimbalInfo;
+    GPSInfo droneGPS{37.7749, -122.4194, 100.0}; // Initial GPS coordinates
+
+    while (true) {
+        // Simulate GPS updates (for demonstration purposes)
+        droneGPS.latitude += 0.0001;  // Change in latitude for simulation
+        droneGPS.longitude -= 0.0002; // Change in longitude for simulation
+        droneGPS.altitude += 1.0;     // Change in altitude for simulation
+
+        mavlink_message_t msg;
+        uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+
+        ssize_t received = recvfrom(udpSocket, buf, sizeof(buf), 0, nullptr, nullptr);
+
+        if (received > 0) {
+            for (int i = 0; i < received; ++i) {
+                if (mavlink_parse_char(MAVLINK_COMM_0, buf[i], &msg, nullptr)) {
+                    if (msg.msgid == MAVLINK_MSG_ID_MOUNT_CONTROL) {
+                        mavlink_mount_control_t controlMsg;
+                        mavlink_msg_mount_control_decode(&msg, &controlMsg);
+
+                        // Parse and process gimbal control commands
+                        parseGimbalCommand(controlMsg, droneGPS, gimbalInfo);
+
+                        // Process gimbal control commands as needed
+                        // ...
+
+                        // Send gimbal angles to /dev/ttyUSB0
+                        // sendGimbalAngles(gimbalInfo);
+                    } else if (msg.msgid == MAVLINK_MSG_ID_HEARTBEAT) {
+                        mavlink_heartbeat_t heartbeatMsg;
+                        mavlink_msg_heartbeat_decode(&msg, &heartbeatMsg);
+
+                        // Process heartbeat information
+                        // parseHeartbeat(heartbeatMsg);
+                    }
+                }
+            }
+        }
+
+        // Send heartbeat at the specified interval
+        static auto lastHeartbeatTime = std::chrono::steady_clock::now();
+        auto currentTime = std::chrono::steady_clock::now();
+
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - lastHeartbeatTime).count() >= HEARTBEAT_INTERVAL_MS) {
+            sendHeartbeat(udpSocket);
+            lastHeartbeatTime = currentTime;
+        }
+
+        usleep(10000); // Sleep for a short duration to avoid high CPU usage
+    }
+
+    close(udpSocket);
+
+    return 0;
+}
+
